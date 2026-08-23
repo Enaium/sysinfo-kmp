@@ -1,0 +1,221 @@
+name: Publish
+
+"on":
+  workflow_dispatch:
+
+# Publishes every artifact from the runner that can build it. Maven Central
+# coordinates are immutable, so each publication is produced by exactly one
+# runner:
+#
+#   macos-14      -> :sysinfo-kmp metadata + jvm + macosArm64/macosX64 klibs
+#                    (each with the embedded libsyskmp.a static library built
+#                    by cargo on this runner) +
+#                    sysinfo-kmp-jni-jvm-darwin-{aarch64,x86_64}
+#   ubuntu-latest -> :sysinfo-kmp linuxX64 + linuxArm64 + mingwX64 klibs
+#                    (static libraries need no platform linker, so all three
+#                    are built here; the latter two are cross targets) +
+#                    sysinfo-kmp-jni-jvm-linux-{x86_64,aarch64} (the aarch64
+#                    cdylib is linked with the aarch64-linux-gnu-gcc cross
+#                    toolchain)
+#   windows-latest -> sysinfo-kmp-jni-jvm-windows-x86_64 (cargo
+#                    x86_64-pc-windows-gnu links self-contained via lld)
+#   ubuntu-latest -> :sysinfo-kmp androidNative klibs (arm64/arm32/x64/x86;
+#                    static libraries, no NDK required)
+#
+# The kotlinMultiplatform metadata module (published from macOS) redirects to
+# the per-target klib modules, so all of them must be published before
+# consumers can resolve the artifact.
+#
+# Trigger: run manually via the Actions tab. Version is fixed at 1.0.0
+# (build.gradle.kts).
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   MAVEN_CENTRAL_USERNAME   Sonatype Central Portal user-token username
+#   MAVEN_CENTRAL_PASSWORD   Sonatype Central Portal user-token password
+#   SIGNING_KEY              base64-encoded PGP secret key ring (.gpg, binary)
+#   SIGNING_KEY_ID           8-hex-digit key id (without the 0x prefix)
+#   SIGNING_PASSWORD         Passphrase of the signing key
+
+jobs:
+  publish-macos:
+    name: Publish macOS (metadata + jvm + Apple klibs + darwin JNI)
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Rust targets
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Decode signing key
+        run: |
+          echo "${{ secrets.SIGNING_KEY }}" | tr -d ' \n' | base64 -d > "$RUNNER_TEMP/signing-key.gpg"
+          ls -la "$RUNNER_TEMP/signing-key.gpg"
+          head -c 16 "$RUNNER_TEMP/signing-key.gpg" | od -c | head -2
+
+      # Per-target publications are used instead of
+      # publishAllPublicationsToMavenCentralRepository so that the linuxX64 /
+      # linuxArm64 / mingwX64 / androidNative klibs (built with their embedded
+      # static library on the Linux runners) are not published from here as
+      # bindings-only klibs.
+      - name: Publish metadata, jvm, Apple klibs and the darwin JNI artifacts
+        run: >
+          ./gradlew --no-daemon --stacktrace
+          -Psigning.keyId="${{ secrets.SIGNING_KEY_ID }}"
+          -Psigning.secretKeyRingFile="${{ runner.temp }}/signing-key.gpg"
+          -Psigning.password="${{ secrets.SIGNING_PASSWORD }}"
+          :sysinfo-kmp:publishKotlinMultiplatformPublicationToMavenCentralRepository
+          :sysinfo-kmp:publishJvmPublicationToMavenCentralRepository
+          :sysinfo-kmp:publishMacosArm64PublicationToMavenCentralRepository
+          :sysinfo-kmp:publishMacosX64PublicationToMavenCentralRepository
+          :jni-jvm-darwin-aarch64:publishMavenPublicationToMavenCentralRepository
+          :jni-jvm-darwin-x86_64:publishMavenPublicationToMavenCentralRepository
+          --continue
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+
+  publish-linux:
+    name: Publish Linux (linuxX64/linuxArm64/mingwX64 klibs + linux JNI)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Only the aarch64 cross *linker* is needed: static libraries are plain
+      # object archives (no link step), while the aarch64 JNI cdylib must be
+      # linked against glibc.
+      - name: Install cross linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Rust targets
+        run: rustup target add aarch64-unknown-linux-gnu x86_64-pc-windows-gnu
+
+      - name: Decode signing key
+        run: |
+          echo "${{ secrets.SIGNING_KEY }}" | tr -d ' \n' | base64 -d > "$RUNNER_TEMP/signing-key.gpg"
+          ls -la "$RUNNER_TEMP/signing-key.gpg"
+          head -c 16 "$RUNNER_TEMP/signing-key.gpg" | od -c | head -2
+
+      - name: Publish linuxX64/linuxArm64/mingwX64 klibs and the linux JNI artifacts
+        run: >
+          ./gradlew --no-daemon --stacktrace
+          -Psigning.keyId="${{ secrets.SIGNING_KEY_ID }}"
+          -Psigning.secretKeyRingFile="${{ runner.temp }}/signing-key.gpg"
+          -Psigning.password="${{ secrets.SIGNING_PASSWORD }}"
+          :sysinfo-kmp:publishLinuxX64PublicationToMavenCentralRepository
+          :sysinfo-kmp:publishLinuxArm64PublicationToMavenCentralRepository
+          :sysinfo-kmp:publishMingwX64PublicationToMavenCentralRepository
+          :jni-jvm-linux-x86_64:publishMavenPublicationToMavenCentralRepository
+          :jni-jvm-linux-aarch64:publishMavenPublicationToMavenCentralRepository
+          # The windows-x86_64 JNI artifact is published by the
+          # publish-windows job below, not cross-published from here.
+          --continue
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+  publish-android:
+    name: Publish Android (androidNative klibs)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Kotlin/Native provides the bionic sysroot at consumer link time and
+      # the Rust static libraries are pure archives, so no Android NDK is
+      # required here.
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Rust targets
+        run: rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
+
+      - name: Decode signing key
+        run: |
+          echo "${{ secrets.SIGNING_KEY }}" | tr -d ' \n' | base64 -d > "$RUNNER_TEMP/signing-key.gpg"
+          ls -la "$RUNNER_TEMP/signing-key.gpg"
+          head -c 16 "$RUNNER_TEMP/signing-key.gpg" | od -c | head -2
+
+      - name: Publish androidNative klibs
+        run: >
+          ./gradlew --no-daemon --stacktrace
+          -Psigning.keyId="${{ secrets.SIGNING_KEY_ID }}"
+          -Psigning.secretKeyRingFile="${{ runner.temp }}/signing-key.gpg"
+          -Psigning.password="${{ secrets.SIGNING_PASSWORD }}"
+          :sysinfo-kmp:publishAndroidNativeArm64PublicationToMavenCentralRepository
+          :sysinfo-kmp:publishAndroidNativeArm32PublicationToMavenCentralRepository
+          :sysinfo-kmp:publishAndroidNativeX64PublicationToMavenCentralRepository
+          :sysinfo-kmp:publishAndroidNativeX86PublicationToMavenCentralRepository
+          --continue
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+
+  publish-windows:
+    name: Publish Windows (windows-x86_64 JNI artifact)
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Rust target
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: Decode signing key
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes(
+            "$env:RUNNER_TEMP\signing-key.gpg",
+            [Convert]::FromBase64String("${{ secrets.SIGNING_KEY }}")
+          )
+          Get-Item "$env:RUNNER_TEMP\signing-key.gpg" | Select-Object Length
+
+      - name: Publish the windows-x86_64 JNI artifact
+        shell: cmd
+        run: >
+          ./gradlew --no-daemon --stacktrace
+          -Psigning.keyId="${{ secrets.SIGNING_KEY_ID }}"
+          -Psigning.secretKeyRingFile="${{ runner.temp }}\signing-key.gpg"
+          -Psigning.password="${{ secrets.SIGNING_PASSWORD }}"
+          :jni-jvm-windows-x86_64:publishMavenPublicationToMavenCentralRepository
+          --continue
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}

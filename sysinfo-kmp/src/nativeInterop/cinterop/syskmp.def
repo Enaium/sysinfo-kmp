@@ -1,0 +1,19 @@
+package = syskmp
+
+headers = ../../../../rust/include/syskmp.h
+headerFilter = **
+
+compilerOpts = -ferror-limit=0
+
+# Platform-specific linker options (suffixes are Kotlin/Native family names,
+# lowercase: osx/linux/mingw/android). These are baked into the produced klib
+# and applied when the consumer's final binary is linked.
+#
+# macOS: sysinfo uses the objc2 crates, which link against CoreFoundation,
+# IOKit (components/disk), OpenDirectory (users) and the Objective-C runtime.
+linkerOpts.osx = -framework CoreFoundation -framework IOKit -framework OpenDirectory -lobjc
+# Linux: sysinfo links against libc; pull the standard supporting libs.
+linkerOpts.linux = -lpthread -lm -ldl
+# Windows (MinGW): sysinfo's windows-crate surfaces require these import
+# libraries, which ship with the Kotlin/Native MinGW sysroot.
+linkerOpts.mingw = -lws2_32 -liphlpapi -ladvapi32 -lole32 -loleaut32 -lntdll -lnetapi32 -luuid -lbcrypt

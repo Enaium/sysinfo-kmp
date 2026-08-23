@@ -1,0 +1,24 @@
+[package]
+name = "syskmp"
+version = "0.39.6"
+edition = "2024"
+description = "FFI shim over the sysinfo crate for the sysinfo-kmp Kotlin Multiplatform bindings"
+
+[lib]
+name = "syskmp"
+# staticlib: linked into the Kotlin/Native binaries (embedded in the cinterop klib).
+# cdylib: the JNI shared library loaded by the JVM target.
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+sysinfo = { version = "0.39", default-features = false, features = [
+    "component",
+    "disk",
+    "system",
+    "network",
+    "user",
+] }
+jni = "0.21"
+
+[profile.release]
+strip = true

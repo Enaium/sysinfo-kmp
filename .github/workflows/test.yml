@@ -1,0 +1,219 @@
+name: Test
+
+"on":
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# Mirrors the publish pipeline on every runner: each job first publishes the
+# artifacts it can build to Maven Local (signed, exactly like the release
+# path), then runs the test suite. This validates the full publication
+# pipeline — including PGP signing — on every push, not just at release time.
+#
+#   macOS ARM64 -> :sysinfo-kmp metadata + jvm + macosArm64/macosX64 klibs
+#                  (each with the embedded libsyskmp.a static library) +
+#                  sysinfo-kmp-jni-jvm-darwin-{aarch64,x86_64},
+#                  JVM + native tests, example (JVM + native)
+#   Linux x64   -> :sysinfo-kmp linuxX64 + linuxArm64 + mingwX64 klibs
+#                  (cross-compiled; static libraries need no platform linker)
+#                  + sysinfo-kmp-jni-jvm-linux-{x86_64,aarch64} (the aarch64
+#                  cdylib is linked with the aarch64-linux-gnu-gcc cross
+#                  toolchain), JVM + native tests, example
+#   Windows x64 -> sysinfo-kmp-jni-jvm-windows-x86_64 (cargo gnu,
+#                  self-contained lld), JVM tests
+#   Android     -> :sysinfo-kmp androidNative klibs (arm64/arm32/x64/x86;
+#                  static libraries, no NDK required)
+#
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-macos:
+    name: Test macOS ARM64
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Rust targets
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Decode signing key
+        run: |
+          echo "${{ secrets.SIGNING_KEY }}" | tr -d ' \n' | base64 -d > "$RUNNER_TEMP/signing-key.gpg"
+          ls -la "$RUNNER_TEMP/signing-key.gpg"
+          head -c 16 "$RUNNER_TEMP/signing-key.gpg" | od -c | head -2
+
+      # Per-target publications are used instead of
+      # publishAllPublicationsToMavenLocal so that the linuxX64 / linuxArm64 /
+      # mingwX64 / androidNative klibs (built with their embedded static
+      # library on the Linux runners) are not published from here as
+      # bindings-only klibs.
+      - name: Publish metadata, jvm, Apple klibs and the darwin JNI artifacts to Maven Local
+        run: >
+          ./gradlew --no-daemon --stacktrace
+          -Psigning.keyId="${{ secrets.SIGNING_KEY_ID }}"
+          -Psigning.secretKeyRingFile="${{ runner.temp }}/signing-key.gpg"
+          -Psigning.password="${{ secrets.SIGNING_PASSWORD }}"
+          :sysinfo-kmp:publishKotlinMultiplatformPublicationToMavenLocal
+          :sysinfo-kmp:publishJvmPublicationToMavenLocal
+          :sysinfo-kmp:publishMacosArm64PublicationToMavenLocal
+          :sysinfo-kmp:publishMacosX64PublicationToMavenLocal
+          :jni-jvm-darwin-aarch64:publishToMavenLocal
+          :jni-jvm-darwin-x86_64:publishToMavenLocal
+          --continue
+
+      - name: Run JVM tests
+        run: ./gradlew --no-daemon :sysinfo-kmp:jvmTest
+
+      - name: Run native tests (macosArm64)
+        run: ./gradlew --no-daemon :sysinfo-kmp:macosArm64Test
+
+      - name: Assemble all macOS artifacts
+        run: ./gradlew --no-daemon :sysinfo-kmp:assemble :jni-jvm-darwin-aarch64:jar :jni-jvm-darwin-x86_64:jar :jni-jvm-windows-x86_64:jar
+
+      - name: Run example (JVM)
+        run: ./gradlew --no-daemon :examples:simple:jvmRun
+
+      - name: Run example (native, macosArm64)
+        run: ./gradlew --no-daemon :examples:simple:runDebugExecutableMacosArm64
+
+  test-linux:
+    name: Test Linux x64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Only the aarch64 cross *linker* is needed: static libraries are plain
+      # object archives (no link step), while the aarch64 JNI cdylib must be
+      # linked against glibc.
+      - name: Install cross linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Rust targets
+        run: |
+          rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-gnu
+
+      - name: Decode signing key
+        run: |
+          echo "${{ secrets.SIGNING_KEY }}" | tr -d ' \n' | base64 -d > "$RUNNER_TEMP/signing-key.gpg"
+          ls -la "$RUNNER_TEMP/signing-key.gpg"
+          head -c 16 "$RUNNER_TEMP/signing-key.gpg" | od -c | head -2
+
+      - name: Publish linuxX64/linuxArm64/mingwX64 klibs and the linux JNI artifacts to Maven Local
+        run: >
+          ./gradlew --no-daemon --stacktrace
+          -Psigning.keyId="${{ secrets.SIGNING_KEY_ID }}"
+          -Psigning.secretKeyRingFile="${{ runner.temp }}/signing-key.gpg"
+          -Psigning.password="${{ secrets.SIGNING_PASSWORD }}"
+          :sysinfo-kmp:publishLinuxX64PublicationToMavenLocal
+          :sysinfo-kmp:publishLinuxArm64PublicationToMavenLocal
+          :sysinfo-kmp:publishMingwX64PublicationToMavenLocal
+          :jni-jvm-linux-x86_64:publishToMavenLocal
+          :jni-jvm-linux-aarch64:publishToMavenLocal
+          # The windows-x86_64 JNI artifact is built and published by the
+          # test-windows job below, not cross-published from here.
+          --continue
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Run JVM tests
+        run: ./gradlew --no-daemon :sysinfo-kmp:jvmTest
+
+      - name: Run native tests (linuxX64)
+        run: ./gradlew --no-daemon :sysinfo-kmp:linuxX64Test
+
+      - name: Assemble cross-compiled native klibs
+        run: ./gradlew --no-daemon :sysinfo-kmp:linuxArm64MainKlibrary :sysinfo-kmp:mingwX64MainKlibrary
+
+      - name: Build example (JVM + native)
+        run: ./gradlew --no-daemon :examples:simple:jvmRun :examples:simple:assemble
+
+  test-windows:
+    name: Test Windows x64
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Rust target
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: Decode signing key
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes(
+            "$env:RUNNER_TEMP\signing-key.gpg",
+            [Convert]::FromBase64String("${{ secrets.SIGNING_KEY }}")
+          )
+          Get-Item "$env:RUNNER_TEMP\signing-key.gpg" | Select-Object Length
+
+      - name: Publish the windows-x86_64 JNI artifact to Maven Local
+        shell: cmd
+        run: >
+          ./gradlew --no-daemon --stacktrace
+          -Psigning.keyId="${{ secrets.SIGNING_KEY_ID }}"
+          -Psigning.secretKeyRingFile="${{ runner.temp }}\signing-key.gpg"
+          -Psigning.password="${{ secrets.SIGNING_PASSWORD }}"
+          :jni-jvm-windows-x86_64:publishToMavenLocal
+          --continue
+
+      - name: Run JVM tests and assemble Windows JNI jar
+        run: ./gradlew --no-daemon :sysinfo-kmp:jvmTest :jni-jvm-windows-x86_64:jar
+
+  test-android:
+    name: Test Android Native
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Kotlin/Native provides the bionic sysroot at consumer link time and
+      # the Rust static libraries are pure archives, so no Android NDK is
+      # required here.
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Rust Android targets
+        run: rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
+
+      - name: Build androidNative klibs
+        run: ./gradlew --no-daemon :sysinfo-kmp:compileKotlinAndroidNativeArm64 :sysinfo-kmp:compileKotlinAndroidNativeArm32 :sysinfo-kmp:compileKotlinAndroidNativeX64 :sysinfo-kmp:compileKotlinAndroidNativeX86
