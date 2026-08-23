@@ -103,7 +103,7 @@ jobs:
       - name: Install cross linker
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6

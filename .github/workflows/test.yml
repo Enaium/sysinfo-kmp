@@ -81,7 +81,7 @@ jobs:
         run: ./gradlew --no-daemon :sysinfo-kmp:macosArm64Test
 
       - name: Assemble all macOS artifacts
-        run: ./gradlew --no-daemon :sysinfo-kmp:assemble :jni-jvm-darwin-aarch64:jar :jni-jvm-darwin-x86_64:jar :jni-jvm-windows-x86_64:jar
+        run: ./gradlew --no-daemon :sysinfo-kmp:assemble :jni-jvm-darwin-aarch64:jar :jni-jvm-darwin-x86_64:jar
 
       - name: Run example (JVM)
         run: ./gradlew --no-daemon :examples:simple:jvmRun
@@ -108,7 +108,7 @@ jobs:
       - name: Install cross linker
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6

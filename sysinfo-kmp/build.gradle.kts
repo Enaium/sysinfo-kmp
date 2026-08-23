@@ -1,4 +1,5 @@
 import org.gradle.internal.os.OperatingSystem
+import java.io.File
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
 
 plugins {
@@ -7,9 +8,15 @@ plugins {
 }
 
 val rustDir = rootProject.file("rust")
-val cargoExecutable: String = providers.exec {
-    commandLine("bash", "-lc", "command -v cargo || ls \$HOME/.cargo/bin/cargo 2>/dev/null")
-}.standardOutput.asText.get().trim().takeIf { it.isNotEmpty() } ?: "cargo"
+// Resolve cargo without spawning a shell (Windows has no bash): prefer the
+// CARGO_HOME binary, then well-known locations, then bare PATH lookup.
+val cargoExecutable: String = run {
+    val isWin = OperatingSystem.current().isWindows
+    val exe = if (isWin) "cargo.exe" else "cargo"
+    val home = System.getenv("CARGO_HOME") ?: (System.getProperty("user.home") + "/.cargo")
+    sequenceOf(File(home, "bin/$exe"), File("/opt/homebrew/bin", exe), File("/usr/local/bin", exe))
+        .firstOrNull { it.isFile }?.absolutePath ?: exe
+}
 
 // Rust targets (uninstalled ones are skipped; the cinterop klib is still
 // produced, just without the embedded static library).
@@ -26,9 +33,13 @@ val nativeTriples = mapOf(
 )
 
 // Cached set of installed rust targets, queried once at configuration time.
-val rustupExecutable: String = providers.exec {
-    commandLine("bash", "-lc", "command -v rustup || ls \$HOME/.cargo/bin/rustup 2>/dev/null")
-}.standardOutput.asText.get().trim().takeIf { it.isNotEmpty() } ?: "rustup"
+val rustupExecutable: String = run {
+    val isWin = OperatingSystem.current().isWindows
+    val exe = if (isWin) "rustup.exe" else "rustup"
+    val home = System.getenv("CARGO_HOME") ?: (System.getProperty("user.home") + "/.cargo")
+    sequenceOf(File(home, "bin/$exe"), File("/opt/homebrew/bin", exe), File("/usr/local/bin", exe))
+        .firstOrNull { it.isFile }?.absolutePath ?: exe
+}
 
 val installedRustTargets: Set<String> by lazy {
     runCatching {
