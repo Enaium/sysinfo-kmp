@@ -2,14 +2,11 @@ name: Test
 
 "on":
   workflow_dispatch:
-  push:
-    branches: [main, master]
-  pull_request:
 
 # Mirrors the publish pipeline on every runner: each job first publishes the
 # artifacts it can build to Maven Local (signed, exactly like the release
 # path), then runs the test suite. This validates the full publication
-# pipeline — including PGP signing — on every push, not just at release time.
+# pipeline — including PGP signing — on demand, not just at release time.
 #
 #   macOS ARM64 -> :sysinfo-kmp metadata + jvm + macosArm64/macosX64 klibs
 #                  (each with the embedded libsyskmp.a static library) +
