@@ -1,11 +1,25 @@
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.DuplicatesStrategy
+import org.gradle.api.provider.ListProperty
 import org.gradle.internal.os.OperatingSystem
 import java.io.File
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.InputFiles
+import org.gradle.api.tasks.TaskAction
 
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
-    alias(libs.plugins.maven.publish)
+    id("com.android.kotlin.multiplatform.library") version "9.3.1"
+    id("com.vanniktech.maven.publish") version "0.37.0"
 }
+
+
 
 val rustDir = rootProject.file("rust")
 // Resolve cargo without spawning a shell (Windows has no bash): prefer the
@@ -53,6 +67,13 @@ fun canBuildNativeTarget(triple: String): Boolean = triple in installedRustTarge
 val hostOs = OperatingSystem.current()
 
 kotlin {
+    // ==================== Android (JVM/ART) ====================
+    android {
+        namespace = "cn.enaium.sysinfo"
+        compileSdk = 36
+        minSdk = 24
+    }
+
     // ==================== JVM ====================
     jvm {
         compilerOptions {
@@ -117,6 +138,11 @@ kotlin {
                 runtimeOnly(project(":jni-jvm-windows-x86_64"))
             }
         }
+        // Shared JNI loading code compiled into both desktop JVM and Android
+        // targets (srcDir sharing keeps the default hierarchy intact).
+        val jvmSharedDir = file("src/jvmSharedMain/kotlin")
+        getByName("jvmMain") { kotlin.srcDir(jvmSharedDir) }
+        getByName("androidMain") { kotlin.srcDir(jvmSharedDir) }
         jvmTest {
             dependencies {
                 implementation(libs.kotlin.test)
@@ -162,6 +188,134 @@ nativeTriples.forEach { (targetName, triple) ->
 }
 
 // JVM JNI resources are declared in the jvmMain source set above.
+
+// ==================== Android (JVM/ART): per-ABI JNI cdylibs via NDK ========
+//
+// The .so files are written straight into src/androidMain/jniLibs/<abi>/ so
+// AGP packages them into the AAR without extra variant wiring.
+
+val androidSdkDir: File? = sequenceOf(
+    System.getenv("ANDROID_HOME"),
+    System.getenv("ANDROID_SDK_ROOT"),
+).mapNotNull { it?.takeIf { v -> v.isNotBlank() }?.let(::File) }.firstOrNull { it.isDirectory }
+    ?: File(System.getProperty("user.home"), "Library/Android/sdk").takeIf { it.isDirectory }
+    ?: File("/opt/android-sdk").takeIf { it.isDirectory }
+
+val androidNdkDir: File? = System.getenv("ANDROID_NDK_HOME")?.let(::File)?.takeIf { it.isDirectory }
+    ?: androidSdkDir?.resolve("ndk")?.listFiles()?.filter { it.isDirectory }?.maxByOrNull { it.name }
+
+// ABI -> (rust triple, NDK clang prefix); minSdk 24 selects the API level.
+// Note: the armv7 clang wrapper is named armv7a-..., unlike the rust triple.
+val androidJniAbis = mapOf(
+    "arm64-v8a" to Pair("aarch64-linux-android", "aarch64-linux-android"),
+    "armeabi-v7a" to Pair("armv7-linux-androideabi", "armv7a-linux-androideabi"),
+    "x86_64" to Pair("x86_64-linux-android", "x86_64-linux-android"),
+    "x86" to Pair("i686-linux-android", "i686-linux-android"),
+)
+
+if (androidNdkDir != null) {
+    val hostTag = when {
+        OperatingSystem.current().isMacOsX -> "darwin-x86_64"
+        OperatingSystem.current().isWindows -> "windows-x86_64"
+        else -> "linux-x86_64"
+    }
+    val llvmBin = androidNdkDir.resolve("toolchains/llvm/prebuilt/$hostTag/bin")
+    val jniRoot = layout.buildDirectory.dir("androidJniSrc").get().asFile
+
+    val abiCargoTasks = androidJniAbis.map { (abi, pair) ->
+        val (triple, clangPrefix) = pair
+        val linker = llvmBin.resolve("${clangPrefix}24-clang").absolutePath
+        val dest = jniRoot.resolve("$abi/libsyskmp.so")
+        tasks.register<Exec>("cargoAndroidJni_$abi") {
+            group = "build"
+            description = "Builds libsyskmp.so for $abi (Android ART)."
+            workingDir = rustDir
+            environment(
+                "CARGO_TARGET_${triple.uppercase().replace('-', '_')}_LINKER",
+                linker,
+            )
+            commandLine(
+                cargoExecutable, "rustc",
+                "--release",
+                "--target", triple,
+                "--crate-type", "cdylib",
+                "--manifest-path", rustDir.resolve("Cargo.toml").absolutePath,
+            )
+            inputs.files(rustDir.resolve("Cargo.toml"), rustDir.resolve("src"))
+            outputs.file(dest)
+            doLast {
+                dest.parentFile.mkdirs()
+                rustDir.resolve("target/$triple/release/libsyskmp.so")
+                    .copyTo(dest, overwrite = true)
+            }
+        }
+    }
+
+    // Inject the .so files into the AAR right after bundling, so native
+    // libraries are packaged only at packaging time (never in the source tree).
+    val inject = tasks.register<InjectAndroidJni>("injectAndroidJni") {
+        soFiles.set(provider {
+            abiCargoTasks.flatMap { tp -> tp.get().outputs.files.files }
+        })
+        aarDir.set(layout.buildDirectory.dir("outputs/aar"))
+    }
+    inject.configure { dependsOn(abiCargoTasks) }
+    tasks.matching { it.name == "bundleAndroidMainAar" }.configureEach { finalizedBy(inject) }
+} else {
+    logger.lifecycle(
+        "sysinfo-kmp: Android NDK not found - skipping bundled libsyskmp.so for the " +
+            "android (ART) target. Consumers must provide libsyskmp.so themselves or use the " +
+            "androidNative* targets.",
+    )
+}
+
+// Adds jni/<abi>/libsyskmp.so entries into the assembled AAR.
+
+abstract class InjectAndroidJni : DefaultTask() {
+    @get:InputFiles
+    abstract val soFiles: ListProperty<File>
+
+    @get:Internal
+    abstract val aarDir: DirectoryProperty
+
+    @TaskAction
+    fun run() {
+        val candidates = aarDir.get().asFile.listFiles { f -> f.name.endsWith(".aar") }
+            ?: throw IllegalStateException("No AAR found under \${aarDir.get().asFile}")
+        val aar = candidates.singleOrNull()
+            ?: throw IllegalStateException("Expected exactly one AAR, found: \$candidates")
+
+        val tmp = File(aar.parentFile, aar.nameWithoutExtension + "-jni.tmp")
+        tmp.deleteRecursively(); tmp.mkdirs()
+        ZipFile(aar).use { z ->
+            val en = z.entries()
+            while (en.hasMoreElements()) {
+                val e = en.nextElement()
+                val f = File(tmp, e.name)
+                if (e.isDirectory) f.mkdirs()
+                else {
+                    f.parentFile?.mkdirs()
+                    z.getInputStream(e).use { input -> f.outputStream().use { input.copyTo(it) } }
+                }
+            }
+        }
+        soFiles.get().forEach { so ->
+            val abi = so.parentFile.name
+            val dst = File(tmp, "jni/$abi").apply { mkdirs() }
+            so.copyTo(File(dst, so.name), overwrite = true)
+        }
+        val out = File(aar.parentFile, aar.name + ".new")
+        ZipOutputStream(out.outputStream()).use { zos ->
+            tmp.walkTopDown().filter { it.isFile }.forEach { f ->
+                zos.putNextEntry(ZipEntry(f.relativeTo(tmp).path))
+                f.inputStream().use { it.copyTo(zos) }
+                zos.closeEntry()
+            }
+        }
+        out.copyTo(aar, overwrite = true)
+        tmp.deleteRecursively(); out.delete()
+    }
+}
 
 // ==================== Publishing ====================
 mavenPublishing {

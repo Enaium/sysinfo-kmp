@@ -95,6 +95,22 @@ fun main() {
 ./gradlew :examples:simple:runDebugExecutableMacosArm64
 ```
 
+### Android (ART / Compose)
+
+`examples/android-compose` is a Jetpack Compose application that renders the
+whole API on-device. The sysinfo shared library ships inside the published
+AAR's `jni/<abi>` entries, so nothing beyond the dependency is required:
+
+```bash
+# Publish the Android AAR locally once (any host with the NDK; the cargo
+# cdylibs are linked through the NDK toolchain automatically).
+./gradlew :sysinfo-kmp:publishAndroidPublicationToMavenLocal
+
+# Build the APK (isolated Gradle build, AGP 9 built-in Kotlin + Compose)
+./gradlew -p examples/android-compose assembleDebug
+adb install -r examples/android-compose/build/outputs/apk/debug/*.apk
+```
+
 ## Development
 
 The Rust shim lives in `rust/` (`cargo build --release` produces both the static library and the cdylib). Gradle invokes cargo automatically; the only prerequisite is a rustup toolchain with the desired targets installed:

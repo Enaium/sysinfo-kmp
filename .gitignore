@@ -46,3 +46,9 @@ bin/
 .DS_Store
 ### Rust ###
 rust/target/
+
+### Android local SDK path
+local.properties
+
+### Heap dumps
+*.hprof

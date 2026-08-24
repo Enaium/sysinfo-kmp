@@ -16,7 +16,22 @@ internal object NativeLoader {
     private const val LIB_NAME = "syskmp"
     private const val RESOURCE_BASE = "/cn/enaium/sysinfo/native"
 
+    /** True when running on the Android runtime (ART/Dalvik). */
+    private val isAndroid: Boolean by lazy {
+        runCatching { Class.forName("android.os.Build") }.isSuccess
+    }
+
     fun load() {
+        // On Android the shared library ships inside the AAR's jniLibs, so the
+        // standard loadLibrary path applies (no temp-dir extraction).
+        if (isAndroid) {
+            java.lang.System.loadLibrary(LIB_NAME)
+            return
+        }
+        loadDesktop()
+    }
+
+    private fun loadDesktop() {
         val classifier = detectClassifier()
         val isWindows = classifier.startsWith("windows")
         val prefix = if (isWindows) "" else "lib"
