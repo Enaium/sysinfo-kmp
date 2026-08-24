@@ -229,6 +229,9 @@ if (androidNdkDir != null) {
         tasks.register<Exec>("cargoAndroidJni_$abi") {
             group = "build"
             description = "Builds libsyskmp.so for $abi (Android ART)."
+            // Skipped on hosts without this rust target (e.g. macOS CI that
+            // never packages the AAR).
+            onlyIf { canBuildNativeTarget(triple) }
             workingDir = rustDir
             environment(
                 "CARGO_TARGET_${triple.uppercase().replace('-', '_')}_LINKER",
@@ -299,7 +302,12 @@ abstract class InjectAndroidJni : DefaultTask() {
                 }
             }
         }
-        soFiles.get().forEach { so ->
+        val staged = soFiles.get().filter { it.exists() }
+        if (staged.isEmpty()) {
+            logger.lifecycle("injectAndroidJni: no .so staged (NDK-less host); leaving AAR unchanged")
+            return
+        }
+        staged.forEach { so ->
             val abi = so.parentFile.name
             val dst = File(tmp, "jni/$abi").apply { mkdirs() }
             so.copyTo(File(dst, so.name), overwrite = true)
