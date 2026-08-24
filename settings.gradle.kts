@@ -37,4 +37,7 @@ listOf(
     project(name).projectDir = file("jni-jvm/$classifier")
 }
 
-include(":examples:simple")
+// The Compose example is an isolated Gradle build (AGP 9 built-in Kotlin +
+// Compose application): including it as a composite build keeps its plugin
+// classpath separate from the root build's Kotlin Multiplatform classpath.
+includeBuild("examples/android-compose")

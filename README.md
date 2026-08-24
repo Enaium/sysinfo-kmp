@@ -80,7 +80,16 @@ fun main() {
 
 ## Examples
 
-`examples/simple` prints every section of the API (host info, motherboard/product, memory, CPUs, processes with all fields, disks, networks, components, users with groups, groups). It runs on JVM and every native target:
+Two standalone examples live under `examples/`:
+
+- **`examples/simple`** — console demo (JVM + every native target) that
+  prints each API section: host info, motherboard/product, memory, CPUs,
+  processes with all fields, disks, networks, components, users with groups.
+- **`examples/android-compose`** — Jetpack Compose application for Android
+  (ART) that renders the same sections on-device. It is an isolated Gradle
+  build included as a composite build (`includeBuild`), using AGP 9's
+  built-in Kotlin + Compose; its plugin classpath stays separate from the
+  root build's Kotlin Multiplatform classpath.
 
 ```bash
 # Publish the library to the local Maven repository first (each platform
@@ -88,25 +97,25 @@ fun main() {
 # Linux -> linux/mingw klibs/linux JNI, Windows -> windows JNI).
 ./gradlew :sysinfo-kmp:publishToMavenLocal :jni-jvm-<os>-<arch>:publishToMavenLocal
 
-# JVM
+# simple — JVM
 ./gradlew :examples:simple:jvmRun
 
-# Native
+# simple — Native
 ./gradlew :examples:simple:runDebugExecutableMacosArm64
 ```
 
 ### Android (ART / Compose)
 
-`examples/android-compose` is a Jetpack Compose application that renders the
-whole API on-device. The sysinfo shared library ships inside the published
-AAR's `jni/<abi>` entries, so nothing beyond the dependency is required:
+The sysinfo shared library ships inside the published AAR's `jni/<abi>`
+entries, so nothing beyond the dependency is required:
 
 ```bash
 # Publish the Android AAR locally once (any host with the NDK; the cargo
 # cdylibs are linked through the NDK toolchain automatically).
 ./gradlew :sysinfo-kmp:publishAndroidPublicationToMavenLocal
 
-# Build the APK (isolated Gradle build, AGP 9 built-in Kotlin + Compose)
+# Build the APK (composite build — run through -p so Gradle picks up its
+# own settings.gradle.kts)
 ./gradlew -p examples/android-compose assembleDebug
 adb install -r examples/android-compose/build/outputs/apk/debug/*.apk
 ```
